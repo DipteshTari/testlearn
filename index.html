@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Passive Vocabulary</title>
+<style>
+  :root{
+    --bg:#050505;
+    --word:#ece9e2;     /* headword */
+    --def:#c2bfb6;      /* definition / body */
+    --meta:#88867f;     /* phonetic, part of speech, eyebrow */
+    --dim:#6b6b66;      /* dimmest tier: example sentence */
+    --accent:#b8860b;   /* muted amber — used only for the active TTS moment */
+    --ui:#6b6b66;
+    --fade:1600ms;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;background:var(--bg);overflow:hidden}
+  body{
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+    cursor:none;
+  }
+  body.active{cursor:default}
+
+  /* Stage drifts very slowly as a whole — this is the burn-in protection.
+     The text moves across the panel over minutes; the card content itself
+     cross-fades independently. */
+  #stage{position:fixed;inset:0;animation:drift 220s ease-in-out infinite}
+  @keyframes drift{
+    0%  {transform:translate(-2.4%,-1.4%)}
+    25% {transform:translate(2.2%, 1.6%)}
+    50% {transform:translate(2.6%,-1.0%)}
+    75% {transform:translate(-1.6%,2.2%)}
+    100%{transform:translate(-2.4%,-1.4%)}
+  }
+
+  .card{
+    position:absolute;inset:0;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:clamp(1rem,2.6vh,2.4rem);
+    padding:6vh 8vw;text-align:center;
+    opacity:0;transition:opacity var(--fade) ease;
+    will-change:opacity;
+  }
+  .card.show{opacity:1}
+
+  .eyebrow{
+    font-size:0.85rem;
+    color:var(--meta);letter-spacing:0.02em;
+    height:1.2em;
+  }
+  .speak-icon{
+    color:var(--dim);opacity:.7;
+    transition:color .5s ease;
+  }
+  .speak-icon.active{color:var(--accent);opacity:1}
+
+  .word{
+    font-family:Georgia,"Times New Roman",serif;
+    font-weight:400;
+    font-size:clamp(3rem,11vw,11rem);
+    line-height:1.02;color:var(--word);
+    letter-spacing:0.01em;
+  }
+  .meta{
+    font-size:clamp(0.95rem,2.1vw,1.9rem);
+    color:var(--meta);letter-spacing:0.01em;font-weight:400;
+  }
+  .meta .dot{margin:0 .6em;opacity:.6}
+  .def{
+    font-size:clamp(1.3rem,3.1vw,2.9rem);
+    line-height:1.4;color:var(--def);max-width:18em;font-weight:400;
+  }
+  .eg{
+    font-size:clamp(1.05rem,2.3vw,2.1rem);
+    line-height:1.5;color:var(--dim);max-width:24em;
+    font-family:Georgia,"Times New Roman",serif;font-style:italic;font-weight:400;
+  }
+
+  /* Controls — hidden until the viewer does something, then auto-hide. */
+  #bar{
+    position:fixed;left:50%;bottom:max(2.2vh,18px);transform:translateX(-50%) translateY(14px);
+    display:flex;align-items:center;gap:8px;
+    padding:8px 10px;border-radius:999px;
+    background:rgba(20,20,20,.82);backdrop-filter:blur(8px);
+    border:1px solid rgba(255,255,255,.07);
+    opacity:0;pointer-events:none;transition:opacity .35s ease,transform .35s ease;
+    font-size:14px;color:var(--ui);
+  }
+  body.active #bar{opacity:1;pointer-events:auto;transform:translateX(-50%) translateY(0)}
+  #bar button{
+    font:inherit;color:var(--def);background:transparent;border:0;cursor:pointer;
+    padding:7px 12px;border-radius:999px;white-space:nowrap;
+  }
+  #bar button:hover,#bar button:focus-visible{background:rgba(255,255,255,.08);outline:none}
+  #bar button:focus-visible{box-shadow:0 0 0 2px rgba(255,255,255,.25)}
+  #bar .sep{width:1px;height:18px;background:rgba(255,255,255,.1)}
+  #stats{padding:0 10px;font-variant-numeric:tabular-nums;color:var(--ui);white-space:nowrap}
+
+  #hint{
+    position:fixed;left:50%;bottom:max(2.2vh,18px);transform:translateX(-50%);
+    font-size:13px;color:#4a4a47;letter-spacing:.02em;
+    transition:opacity 1s ease;
+  }
+  body.active #hint{opacity:0}
+
+  @media (prefers-reduced-motion:reduce){
+    #stage{animation-duration:600s}      /* keep some drift for burn-in, but slower */
+    .card{transition-duration:900ms}
+  }
+</style>
+</head>
+<body>
+  <div id="stage">
+    <div class="card" id="cardA"></div>
+    <div class="card" id="cardB"></div>
+  </div>
+
+  <div id="hint">press any key or tap for settings</div>
+
+  <div id="bar" role="toolbar" aria-label="Settings">
+    <button id="btnPlay" aria-label="Pause">Pause</button>
+    <div class="sep"></div>
+    <button id="btnPace">Pace 18s</button>
+    <button id="btnSound">Sound off</button>
+    <div class="sep"></div>
+    <button id="btnNext" aria-label="Next word">Skip</button>
+    <button id="btnReset">Reset</button>
+    <div class="sep"></div>
+    <span id="stats"></span>
+  </div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * Passive Vocabulary — single-file TV screensaver prototype
+ *
+ * Three pieces, mirroring the architecture:
+ *   1. DECK      — static content, baked in (would normally be a JSON file on a CDN)
+ *   2. SCHEDULER — spaced-EXPOSURE selection (no recall grading, so not classic SRS)
+ *   3. STATE     — per-word counts + settings persisted to localStorage
+ * No network, no dependencies — runs offline on any browser/TV.
+ * ------------------------------------------------------------------ */
+
+/* 1. DECK ----------------------------------------------------------- */
+const DECK = [
+  { "word": "accurate", "pronunciation": "AK-yer-it", "part_of_speech": "adjective", "definition": "Correct and exact, with no mistakes.", "example": "She gave an accurate description of the lost dog." },
+  { "word": "achievement", "pronunciation": "uh-CHEEV-ment", "part_of_speech": "noun", "definition": "Something done successfully through effort.", "example": "Finishing the marathon was a huge achievement for him." },
+  { "word": "ancient", "pronunciation": "AYN-shent", "part_of_speech": "adjective", "definition": "Very old; from a long time ago.", "example": "The museum has an ancient vase from Egypt." },
+  { "word": "announce", "pronunciation": "uh-NOWNSS", "part_of_speech": "verb", "definition": "To say something publicly so others know.", "example": "The teacher will announce the winners after lunch." },
+  { "word": "appropriate", "pronunciation": "uh-PROH-pree-it", "part_of_speech": "adjective", "definition": "Suitable or correct for a situation.", "example": "It is not appropriate to shout in the library." },
+  { "word": "arrange", "pronunciation": "uh-RAYNJ", "part_of_speech": "verb", "definition": "To put things in a certain order or position.", "example": "Please arrange the books by color on the shelf." },
+  { "word": "average", "pronunciation": "AV-er-ij", "part_of_speech": "adjective", "definition": "Usual or typical; not unusually large or small.", "example": "The average temperature in June is quite warm." },
+  { "word": "boundary", "pronunciation": "BOWN-duh-ree", "part_of_speech": "noun", "definition": "A line that marks the edge of an area.", "example": "The fence marks the boundary of our backyard." },
+  { "word": "cautious", "pronunciation": "KAW-shus", "part_of_speech": "adjective", "definition": "Careful to avoid danger or mistakes.", "example": "Be cautious when crossing the busy street." },
+  { "word": "collapse", "pronunciation": "kuh-LAPS", "part_of_speech": "verb", "definition": "To fall down or break apart suddenly.", "example": "The old bridge began to collapse during the storm." },
+  { "word": "communicate", "pronunciation": "kuh-MYOO-ni-kayt", "part_of_speech": "verb", "definition": "To share information, thoughts, or feelings.", "example": "We communicate with our pen pals by writing letters." },
+  { "word": "considerable", "pronunciation": "kun-SID-er-uh-bul", "part_of_speech": "adjective", "definition": "Large in size or amount.", "example": "It took a considerable amount of time to build the model." },
+  { "word": "courageous", "pronunciation": "kuh-RAY-jus", "part_of_speech": "adjective", "definition": "Brave; not afraid to face danger or difficulty.", "example": "The firefighter was courageous when she ran into the smoke." },
+  { "word": "curious", "pronunciation": "KYOOR-ee-us", "part_of_speech": "adjective", "definition": "Eager to learn or know more about something.", "example": "The curious kitten poked its head into every box." },
+  { "word": "delicate", "pronunciation": "DEL-i-kit", "part_of_speech": "adjective", "definition": "Easily broken or damaged; fine and fragile.", "example": "Handle the glass ornament gently because it is delicate." },
+  { "word": "determine", "pronunciation": "di-TUR-min", "part_of_speech": "verb", "definition": "To decide something firmly, or to find out for certain.", "example": "Scientists will determine the cause of the disease." },
+  { "word": "drowsy", "pronunciation": "DROW-zee", "part_of_speech": "adjective", "definition": "Sleepy and tired.", "example": "After lunch, the warm sun made him feel drowsy." },
+  { "word": "eager", "pronunciation": "EE-ger", "part_of_speech": "adjective", "definition": "Wanting very much to do or have something.", "example": "She was eager to open her birthday presents." },
+  { "word": "enormous", "pronunciation": "i-NOR-mus", "part_of_speech": "adjective", "definition": "Very, very large in size or amount.", "example": "The blue whale is an enormous animal." },
+  { "word": "essential", "pronunciation": "i-SEN-shul", "part_of_speech": "adjective", "definition": "Absolutely necessary; very important.", "example": "Water is essential for all living things." },
+  { "word": "examine", "pronunciation": "ig-ZAM-in", "part_of_speech": "verb", "definition": "To look at something closely and carefully.", "example": "The doctor will examine your arm to check the bone." },
+  { "word": "exhausted", "pronunciation": "ig-ZAW-stid", "part_of_speech": "adjective", "definition": "Extremely tired.", "example": "After the long hike, the hikers were exhausted." },
+  { "word": "fragile", "pronunciation": "FRAJ-ul", "part_of_speech": "adjective", "definition": "Easily broken or damaged.", "example": "Mark the box 'fragile' because it has dishes inside." },
+  { "word": "frequent", "pronunciation": "FREE-kwent", "part_of_speech": "adjective", "definition": "Happening often.", "example": "There were frequent thunderstorms during the rainy season." },
+  { "word": "furious", "pronunciation": "FYOOR-ee-us", "part_of_speech": "adjective", "definition": "Extremely angry.", "example": "He was furious when someone scratched his new bike." },
+  { "word": "generous", "pronunciation": "JEN-er-us", "part_of_speech": "adjective", "definition": "Willing to give or share freely.", "example": "It was generous of her to share her lunch with a friend." },
+  { "word": "genuine", "pronunciation": "JEN-yoo-in", "part_of_speech": "adjective", "definition": "Real and true; not fake.", "example": "Her smile showed genuine happiness." },
+  { "word": "gigantic", "pronunciation": "jy-GAN-tik", "part_of_speech": "adjective", "definition": "Extremely large; giant-sized.", "example": "A gigantic sandcastle appeared on the beach." },
+  { "word": "hesitate", "pronunciation": "HEZ-i-tayt", "part_of_speech": "verb", "definition": "To pause before doing or saying something, often because of doubt.", "example": "Don't hesitate to ask if you need help." },
+  { "word": "identical", "pronunciation": "eye-DEN-ti-kul", "part_of_speech": "adjective", "definition": "Exactly the same.", "example": "The twins wore identical red shirts." },
+  { "word": "improve", "pronunciation": "im-PROOV", "part_of_speech": "verb", "definition": "To make or become better.", "example": "Practicing every day will improve your free throws." },
+  { "word": "inquire", "pronunciation": "in-KWY-er", "part_of_speech": "verb", "definition": "To ask for information.", "example": "She decided to inquire about the missing package." },
+  { "word": "isolated", "pronunciation": "EYE-suh-lay-tid", "part_of_speech": "adjective", "definition": "Set apart or alone, away from others.", "example": "The cabin was isolated, miles from the nearest town." },
+  { "word": "magnificent", "pronunciation": "mag-NIF-i-sent", "part_of_speech": "adjective", "definition": "Extremely beautiful or impressive.", "example": "The sunset over the ocean was magnificent." },
+  { "word": "mysterious", "pronunciation": "mi-STEER-ee-us", "part_of_speech": "adjective", "definition": "Difficult to understand or explain; strange.", "example": "A mysterious noise came from the attic at night." },
+  { "word": "necessary", "pronunciation": "NES-uh-sair-ee", "part_of_speech": "adjective", "definition": "Needed in order for something to happen.", "example": "A helmet is necessary when riding a bike." },
+  { "word": "obvious", "pronunciation": "OB-vee-us", "part_of_speech": "adjective", "definition": "Easy to see or understand; clear.", "example": "It was obvious that the cat wanted more food." },
+  { "word": "occasion", "pronunciation": "uh-KAY-zhun", "part_of_speech": "noun", "definition": "A particular time or event.", "example": "We wore nice clothes for the special occasion." },
+  { "word": "overcome", "pronunciation": "oh-ver-KUM", "part_of_speech": "verb", "definition": "To successfully deal with or defeat a problem.", "example": "She worked hard to overcome her fear of swimming." },
+  { "word": "particular", "pronunciation": "per-TIK-yoo-ler", "part_of_speech": "adjective", "definition": "Specific; relating to one certain thing and not others.", "example": "This particular recipe needs extra sugar." },
+  { "word": "permanent", "pronunciation": "PUR-muh-nent", "part_of_speech": "adjective", "definition": "Lasting forever or for a very long time.", "example": "The artist made a permanent mark with the dark ink." },
+  { "word": "persuade", "pronunciation": "per-SWAYD", "part_of_speech": "verb", "definition": "To convince someone to do or believe something.", "example": "He tried to persuade his sister to share her toys." },
+  { "word": "previous", "pronunciation": "PREE-vee-us", "part_of_speech": "adjective", "definition": "Coming before in time; earlier.", "example": "Our previous teacher moved to a different school." },
+  { "word": "rapid", "pronunciation": "RAP-id", "part_of_speech": "adjective", "definition": "Happening very quickly.", "example": "The river had a rapid current after the rain." },
+  { "word": "reluctant", "pronunciation": "ri-LUK-tunt", "part_of_speech": "adjective", "definition": "Not willing to do something; hesitant.", "example": "She was reluctant to try the spicy soup." },
+  { "word": "remarkable", "pronunciation": "ri-MAR-kuh-bul", "part_of_speech": "adjective", "definition": "Worthy of attention; extraordinary.", "example": "The gymnast made a remarkable recovery from her injury." },
+  { "word": "resemble", "pronunciation": "ri-ZEM-bul", "part_of_speech": "verb", "definition": "To look like or be similar to something.", "example": "That cloud seems to resemble a dragon." },
+  { "word": "reveal", "pronunciation": "ri-VEEL", "part_of_speech": "verb", "definition": "To make something known or visible that was hidden.", "example": "The magician will reveal his trick at the end." },
+  { "word": "rural", "pronunciation": "ROOR-ul", "part_of_speech": "adjective", "definition": "Relating to the countryside, rather than a city.", "example": "They moved from the city to a rural farm." },
+  { "word": "scarce", "pronunciation": "SKAIRSS", "part_of_speech": "adjective", "definition": "Not enough of something; rare.", "example": "Fresh water can be scarce during a drought." },
+  { "word": "sincere", "pronunciation": "sin-SEER", "part_of_speech": "adjective", "definition": "Honest and truly meant, without pretending.", "example": "He gave a sincere apology for breaking the vase." },
+  { "word": "stubborn", "pronunciation": "STUB-ern", "part_of_speech": "adjective", "definition": "Refusing to change your mind or give up.", "example": "The stubborn mule wouldn't move from the path." },
+  { "word": "sufficient", "pronunciation": "suh-FISH-ent", "part_of_speech": "adjective", "definition": "Enough for a particular purpose.", "example": "We had sufficient supplies for the camping trip." },
+  { "word": "suspicious", "pronunciation": "suh-SPISH-us", "part_of_speech": "adjective", "definition": "Feeling that something is wrong or untrustworthy.", "example": "The dog gave a suspicious growl at the stranger." },
+  { "word": "tremendous", "pronunciation": "tri-MEN-dus", "part_of_speech": "adjective", "definition": "Very great in size, amount, or degree.", "example": "The team celebrated a tremendous victory." },
+  { "word": "unique", "pronunciation": "yoo-NEEK", "part_of_speech": "adjective", "definition": "Being the only one of its kind; special.", "example": "Every snowflake has a unique pattern." },
+  { "word": "urban", "pronunciation": "UR-bun", "part_of_speech": "adjective", "definition": "Relating to a city or town.", "example": "Tall buildings are common in urban areas." },
+  { "word": "vanish", "pronunciation": "VAN-ish", "part_of_speech": "verb", "definition": "To disappear suddenly and completely.", "example": "The fog made the mountain seem to vanish." },
+  { "word": "vast", "pronunciation": "VAST", "part_of_speech": "adjective", "definition": "Extremely large in area or amount.", "example": "The desert stretched out in a vast sea of sand." },
+  { "word": "vivid", "pronunciation": "VIV-id", "part_of_speech": "adjective", "definition": "Producing strong, clear images in the mind; bright.", "example": "She had a vivid dream about flying over the ocean." }
+];
+
+/* 2/3. STATE + SETTINGS -------------------------------------------- */
+const SKEY="pv_state_v1", CKEY="pv_settings_v1";
+const PACES=[10000,18000,30000,45000,55000];          // dwell options (ms)
+const FADE=1600;
+
+let state, settings, sessShown=0, sessStart=Date.now(), activeMs=0;
+
+function load(){
+  try{ state=JSON.parse(localStorage.getItem(SKEY))||{}; }catch(e){ state={}; }
+  try{ settings=JSON.parse(localStorage.getItem(CKEY))||{}; }catch(e){ settings={}; }
+  if(typeof settings.pace!=="number") settings.pace=18000;
+  if(typeof settings.sound!=="boolean") settings.sound=false;
+  if(typeof settings.paused!=="boolean") settings.paused=false;
+  DECK.forEach(w=>{ if(!state[w.word]) state[w.word]={seen:0,last:0}; });
+}
+const saveState=()=>{ try{localStorage.setItem(SKEY,JSON.stringify(state));}catch(e){} };
+const saveSettings=()=>{ try{localStorage.setItem(CKEY,JSON.stringify(settings));}catch(e){} };
+
+/* SCHEDULER — spaced exposure.
+   Intervals stretch with each exposure. With no recall signal we can't run
+   SM-2; instead we resurface words on a widening schedule and steadily
+   introduce new ones. */
+const INTERVALS=[0, 90e3, 8*60e3, 45*60e3, 4*3600e3, 24*3600e3, 3*24*3600e3, 7*24*3600e3];
+const intervalFor=seen=>INTERVALS[Math.min(seen,INTERVALS.length-1)];
+
+let currentWord=null;
+function pickNext(){
+  const now=Date.now();
+  const fresh=DECK.filter(w=>state[w.word].seen===0 && w!==currentWord);
+  const due=DECK.filter(w=>{
+    const s=state[w.word];
+    return s.seen>0 && w!==currentWord && (now-s.last)>=intervalFor(s.seen);
+  });
+
+  let pick;
+  if(due.length && (fresh.length===0 || Math.random()<0.65)){
+    // most-overdue review (highest elapsed-to-interval ratio)
+    pick=due.reduce((a,b)=>{
+      const ra=(now-state[a.word].last)/intervalFor(state[a.word].seen);
+      const rb=(now-state[b.word].last)/intervalFor(state[b.word].seen);
+      return rb>ra?b:a;
+    });
+  }else if(fresh.length){
+    pick=fresh[0];                       // introduce new words in deck order
+  }else{
+    // nothing strictly due and nothing new: cycle the least-recently-seen
+    pick=DECK.filter(w=>w!==currentWord).reduce((a,b)=>state[a.word].last<=state[b.word].last?a:b);
+  }
+  return pick;
+}
+
+/* RENDER — cross-fade between two layers ---------------------------- */
+const A=document.getElementById("cardA"), B=document.getElementById("cardB");
+let front=A, back=B;
+
+function fill(el,w){
+  const eyebrow=settings.sound?'<div class="eyebrow"><span class="speak-icon">♪</span></div>':'';
+  el.innerHTML=
+    eyebrow+
+    '<div class="word">'+w.word+'</div>'+
+    '<div class="meta">'+w.pronunciation+'<span class="dot">·</span><span class="pos">'+w.part_of_speech+'</span></div>'+
+    '<div class="def">'+w.definition+'</div>'+
+    '<div class="eg">'+esc(w.example)+'</div>';
+}
+const esc=s=>s.replace(/&/g,"&amp;").replace(/</g,"&lt;");
+
+function showWord(w){
+  currentWord=w;
+  state[w.word].seen++; state[w.word].last=Date.now(); saveState();
+  sessShown++;
+
+  fill(back,w);
+  back.classList.add("show");
+  front.classList.remove("show");
+  [front,back]=[back,front];           // swap roles
+
+  if(settings.sound) speak(w);
+  renderStats();
+}
+
+/* TTS — optional, via the browser's built-in speech synthesis -------- */
+function speak(w){
+  if(!("speechSynthesis" in window))return;
+  const icon=front.querySelector(".speak-icon");
+  try{
+    speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(w.word+". "+w.definition);
+    u.rate=0.9; u.pitch=1;
+    if(icon){
+      u.onstart=()=>icon.classList.add("active");
+      u.onend=u.onerror=()=>icon.classList.remove("active");
+    }
+    speechSynthesis.speak(u);
+  }catch(e){}
+}
+
+/* LOOP ------------------------------------------------------------- */
+let timer=null, tickStart=0;
+function schedule(){
+  clearTimeout(timer);
+  if(settings.paused)return;
+  tickStart=Date.now();
+  timer=setTimeout(()=>{ showWord(pickNext()); schedule(); }, settings.pace);
+}
+function advanceNow(){ clearTimeout(timer); showWord(pickNext()); schedule(); }
+
+/* CONTROLS --------------------------------------------------------- */
+const btnPlay=document.getElementById("btnPlay"),
+      btnPace=document.getElementById("btnPace"),
+      btnSound=document.getElementById("btnSound"),
+      btnNext=document.getElementById("btnNext"),
+      btnReset=document.getElementById("btnReset");
+
+function syncUI(){
+  btnPlay.textContent=settings.paused?"Play":"Pause";
+  btnPlay.setAttribute("aria-label",settings.paused?"Play":"Pause");
+  btnPace.textContent="Pace "+(settings.pace/1000)+"s";
+  btnSound.textContent=settings.sound?"Sound on":"Sound off";
+}
+function togglePlay(){
+  settings.paused=!settings.paused; saveSettings(); syncUI();
+  if(settings.paused){ clearTimeout(timer); document.getElementById("stage").style.animationPlayState="paused"; }
+  else { document.getElementById("stage").style.animationPlayState="running"; schedule(); }
+}
+function cyclePace(){
+  const i=PACES.indexOf(settings.pace);
+  settings.pace=PACES[(i+1)%PACES.length]; saveSettings(); syncUI();
+  if(!settings.paused) schedule();
+}
+function toggleSound(){
+  settings.sound=!settings.sound; saveSettings(); syncUI();
+  if(!settings.sound && "speechSynthesis" in window) speechSynthesis.cancel();
+}
+let resetArmed=false;
+function reset(){
+  if(!resetArmed){ resetArmed=true; btnReset.textContent="Sure?"; setTimeout(()=>{resetArmed=false;btnReset.textContent="Reset";},2500); return; }
+  state={}; DECK.forEach(w=>state[w.word]={seen:0,last:0}); saveState();
+  sessShown=0; sessStart=Date.now(); activeMs=0; resetArmed=false; btnReset.textContent="Reset";
+  advanceNow();
+}
+
+btnPlay.onclick=togglePlay; btnPace.onclick=cyclePace; btnSound.onclick=toggleSound;
+btnNext.onclick=advanceNow; btnReset.onclick=reset;
+
+/* STATS — local stand-in for the analytics tail -------------------- */
+function fmtTime(ms){
+  const m=Math.floor(ms/60000), s=Math.floor(ms/1000)%60;
+  return m? m+"m":(s+"s");
+}
+function learnedCount(){ return DECK.filter(w=>state[w.word].seen>=3).length; }
+function renderStats(){
+  document.getElementById("stats").textContent =
+    sessShown+" shown · "+learnedCount()+" learned · "+fmtTime(activeMs)+" on";
+}
+
+/* REVEAL controls on interaction, auto-hide ------------------------ */
+let hideTimer=null;
+function wake(){
+  document.body.classList.add("active");
+  clearTimeout(hideTimer);
+  hideTimer=setTimeout(()=>document.body.classList.remove("active"),4000);
+}
+["mousemove","mousedown","touchstart","keydown"].forEach(ev=>
+  window.addEventListener(ev,wake,{passive:true}));
+
+window.addEventListener("keydown",e=>{
+  switch(e.key){
+    case " ": e.preventDefault(); togglePlay(); break;
+    case "ArrowRight": case "Enter": advanceNow(); break;
+    case "ArrowUp": case "ArrowDown": cyclePace(); break;
+    case "s": case "S": toggleSound(); break;
+    case "r": case "R": reset(); break;
+  }
+});
+
+/* heartbeat: tick active time + (where a real build would POST analytics) */
+setInterval(()=>{
+  if(!settings.paused && !document.hidden){ activeMs+=1000; if(document.body.classList.contains("active")) renderStats(); }
+},1000);
+setInterval(()=>{
+  /* This is where the analytics beacon would fire in production. */
+  if(!settings.paused) console.log("heartbeat",{onMs:activeMs,shown:sessShown,learned:learnedCount()});
+},30000);
+
+document.addEventListener("visibilitychange",()=>{
+  if(document.hidden){ clearTimeout(timer); }
+  else if(!settings.paused){ schedule(); }
+});
+
+/* BOOT ------------------------------------------------------------- */
+load(); syncUI();
+showWord(pickNext());
+schedule();
+if(settings.paused){ document.getElementById("stage").style.animationPlayState="paused"; }
+setTimeout(()=>{ const h=document.getElementById("hint"); if(h) h.style.opacity="0"; },6000);
+</script>
+</body>
+</html>

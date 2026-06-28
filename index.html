@@ -835,21 +835,54 @@
         renderStats();
       }
 
-      /* TTS — optional, via the browser's built-in speech synthesis -------- */
+      /* TTS — optional, via the browser's built-in speech synthesis --------
+   iOS WebKit (Safari and every "Chrome"/"Firefox" on iPhone, since Apple
+   forces them all onto WebKit) has two well-known speechSynthesis bugs:
+   - it can stay silent if no explicit voice is set on the utterance
+   - calling speak() in the same tick as cancel() can drop the utterance
+   We pick an explicit English voice once voices finish loading, and defer
+   the actual speak() one tick after cancel(). */
+      let voices = [];
+      let preferredVoice = null;
+      function loadVoices() {
+        if (!("speechSynthesis" in window)) return;
+        voices = speechSynthesis.getVoices();
+        preferredVoice =
+          voices.find((v) => /en/i.test(v.lang) && v.default) ||
+          voices.find((v) => /en/i.test(v.lang)) ||
+          voices[0] ||
+          null;
+      }
+      if ("speechSynthesis" in window) {
+        loadVoices();
+        speechSynthesis.onvoiceschanged = loadVoices;
+      }
+
       function speak(w) {
         if (!("speechSynthesis" in window)) return;
         const icon = front.querySelector(".speak-icon");
-        try {
+        const fire = () => {
+          try {
+            const u = new SpeechSynthesisUtterance(
+              w.word + ". " + w.definition,
+            );
+            u.rate = 0.9;
+            u.pitch = 1;
+            if (preferredVoice) u.voice = preferredVoice;
+            if (icon) {
+              u.onstart = () => icon.classList.add("active");
+              u.onend = u.onerror = () => icon.classList.remove("active");
+            }
+            speechSynthesis.speak(u);
+          } catch (e) {}
+        };
+        const wasSpeaking = speechSynthesis.speaking || speechSynthesis.pending;
+        if (wasSpeaking) {
           speechSynthesis.cancel();
-          const u = new SpeechSynthesisUtterance(w.word + ". " + w.definition);
-          u.rate = 0.9;
-          u.pitch = 1;
-          if (icon) {
-            u.onstart = () => icon.classList.add("active");
-            u.onend = u.onerror = () => icon.classList.remove("active");
-          }
-          speechSynthesis.speak(u);
-        } catch (e) {}
+          setTimeout(fire, 50); // give iOS a tick between cancel() and speak()
+        } else {
+          fire();
+        }
       }
 
       /* LOOP ------------------------------------------------------------- */

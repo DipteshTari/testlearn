@@ -216,9 +216,30 @@
           transition-duration: 900ms;
         }
       }
+
+      /* Start overlay — mobile/TV browsers block speech synthesis until a
+     real user gesture occurs, so we gate boot behind a tap/click/key. */
+      #start {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--bg);
+        color: var(--def);
+        font-size: clamp(1rem, 2.4vw, 1.6rem);
+        letter-spacing: 0.02em;
+        cursor: pointer;
+      }
+      #start.hide {
+        display: none;
+      }
     </style>
   </head>
   <body>
+    <div id="start">tap, click, or press a key to begin</div>
+
     <div id="stage">
       <div class="card" id="cardA"></div>
       <div class="card" id="cardB"></div>
@@ -999,18 +1020,37 @@
         }
       });
 
-      /* BOOT ------------------------------------------------------------- */
-      load();
-      syncUI();
-      showWord(pickNext());
-      schedule();
-      if (settings.paused) {
-        document.getElementById("stage").style.animationPlayState = "paused";
+      /* BOOT --------------------------------------------------------------
+   Wait for a real user gesture before starting: mobile/TV browsers refuse
+   to play SpeechSynthesis audio that wasn't triggered by direct user
+   interaction, so the first word (and its speech) is gated behind tap/
+   click/keydown rather than firing on page load. */
+      function boot() {
+        load();
+        syncUI();
+        showWord(pickNext());
+        schedule();
+        if (settings.paused) {
+          document.getElementById("stage").style.animationPlayState =
+            "paused";
+        }
+        setTimeout(() => {
+          const h = document.getElementById("hint");
+          if (h) h.style.opacity = "0";
+        }, 6000);
       }
-      setTimeout(() => {
-        const h = document.getElementById("hint");
-        if (h) h.style.opacity = "0";
-      }, 6000);
+
+      const startOverlay = document.getElementById("start");
+      function start() {
+        startOverlay.classList.add("hide");
+        ["click", "touchstart", "keydown"].forEach((ev) =>
+          startOverlay.removeEventListener(ev, start),
+        );
+        boot();
+      }
+      ["click", "touchstart", "keydown"].forEach((ev) =>
+        startOverlay.addEventListener(ev, start, { once: true }),
+      );
     </script>
   </body>
 </html>
